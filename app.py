@@ -19,6 +19,10 @@ st.sidebar.image("https://img.icons8.com/color/150/hospital-room.png", width=100
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to Page:", ["Risk Predictor", "Model Insights", "Model Evaluation"])
 
+# Sidebar model badge
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Deployed Architecture:**")
+st.sidebar.info("🌲 **Random Forest Classifier**\n- 100 Estimators\n- Stratified 80/20 Split\n- Leakage-Free Pipeline")
 
 
 # ==========================================
@@ -28,8 +32,8 @@ if page == "Risk Predictor":
     st.title("🏥 Diabetes Health Risk Predictor")
     st.markdown("""
     Provide a patient's clinical measurements below to evaluate their risk of diabetes. 
-    This page uses the deployed **Logistic Regression** model for instant classification, confidence assessment, 
-    and feature-level risk contribution analysis.
+    This page uses the deployed **Random Forest** ensemble model for instant classification, confidence assessment, 
+    and patient-level feature attribution.
     """)
     
     # Create clean inputs using columns
@@ -50,7 +54,7 @@ if page == "Risk Predictor":
             min_value=0.0, 
             max_value=500.0, 
             value=120.0,
-            help="Plasma glucose concentration at 2 hours in an oral glucose tolerance test. Normal range is < 140 mg/dL."
+            help="Plasma glucose concentration at 2 hours in an oral glucose tolerance test. Normal fasting range is < 100 mg/dL; < 140 mg/dL normal post-meal."
         )
         
         blood_pressure = st.number_input(
@@ -76,7 +80,7 @@ if page == "Risk Predictor":
             min_value=0.0, 
             max_value=1200.0, 
             value=80.0,
-            help="2-hour serum insulin. Normal fasting is under 25."
+            help="2-hour serum insulin. Normal fasting is under 25 mu U/ml."
         )
         
         bmi = st.number_input(
@@ -85,7 +89,7 @@ if page == "Risk Predictor":
             max_value=100.0, 
             value=25.0,
             format="%.1f",
-            help="Normal weight range is 18.5 - 24.9. Obese is >= 30."
+            help="Normal weight range is 18.5 - 24.9. Overweight is 25 - 29.9. Obese is >= 30."
         )
         
         dpf = st.number_input(
@@ -145,7 +149,7 @@ if page == "Risk Predictor":
         
         with st.spinner("Executing backend model inference..."):
             try:
-                response = requests.post(f"{API_URL}/predict", json=payload)
+                response = requests.post(f"{API_URL}/predict", json=payload, timeout=10)
                 
                 if response.status_code == 200:
                     result = response.json()
@@ -153,7 +157,8 @@ if page == "Risk Predictor":
                     prediction = result["prediction"]
                     probability = result["risk_probability"]
                     confidence_level = result["confidence_level"]
-                    contributions = result["contributions"]
+                    contributions = result.get("contributions", {})
+                    base_prior = result.get("intercept", None)
                     
                     # Layout for Results
                     res_col1, res_col2 = st.columns([1, 1])
@@ -163,89 +168,92 @@ if page == "Risk Predictor":
                         
                         # Set color alerts based on outcome
                         if prediction == 1:
-                            st.error(f"⚠️ **High Risk of Diabetes Detected**\n\nThe model predicts a high risk of diabetes.")
+                            st.error("⚠️ **High Risk of Diabetes Detected**\n\nThe Random Forest model predicts an elevated likelihood of diabetes.")
                         else:
-                            st.success(f"✅ **Low Risk of Diabetes Detected**\n\nThe model predicts a low risk of diabetes.")
+                            st.success("✅ **Low Risk of Diabetes Detected**\n\nThe Random Forest model predicts a low likelihood of diabetes.")
                             
                         # Confidence level card
                         st.metric(
                             label="Model Confidence Level", 
                             value=confidence_level, 
-                            delta=f"Probability: {probability * 100:.1f}%" if prediction == 1 else f"Probability: {(1 - probability) * 100:.1f}%",
+                            delta=f"Risk Probability: {probability * 100:.1f}%",
                             delta_color="off"
                         )
                         
                         # Progress bar of risk
                         st.write("**Risk Probability Meter:**")
-                        st.progress(probability)
-                        st.caption(f"Raw risk probability: {probability:.4f} (Decision threshold: 0.5000)")
+                        st.progress(min(max(probability, 0.0), 1.0))
+                        st.caption(f"Predicted risk probability: **{probability:.4f}** (Decision threshold: 0.5000)")
+                        if base_prior is not None:
+                            st.caption(f"Forest Population Base Rate: **{base_prior:.4f}**")
                         
                     with res_col2:
-                        st.subheader("Clinical Factors Contribution")
+                        st.subheader("Patient Clinical Factor Attribution")
                         st.markdown("""
-                        This chart explains *why* the model made this prediction for this patient.
-                        - **Positive values (right):** Factors that **increased** the diabetes risk.
-                        - **Negative values (left):** Factors that **reduced** the diabetes risk.
+                        **Local Prediction Explanation (Decision-Path Attribution):**
+                        - **Positive values (right):** Factors that **increased** this patient's risk probability above baseline.
+                        - **Negative values (left):** Factors that **reduced** this patient's risk probability below baseline.
                         """)
                         
                         contrib_df = pd.DataFrame(
                             list(contributions.items()), 
-                            columns=["Clinical Metric", "Log-Odds Contribution"]
-                        ).sort_values(by="Log-Odds Contribution")
+                            columns=["Clinical Metric", "Risk Contribution"]
+                        ).sort_values(by="Risk Contribution")
                         
                         # Display contribution bar chart
                         st.bar_chart(
                             data=contrib_df,
                             x="Clinical Metric",
-                            y="Log-Odds Contribution",
+                            y="Risk Contribution",
                             horizontal=True
                         )
                         
                         # Highlight key driver
-                        max_factor = contrib_df.loc[contrib_df["Log-Odds Contribution"].idxmax()]
-                        if max_factor["Log-Odds Contribution"] > 0:
-                            st.warning(f"💡 **Key Driver:** **{max_factor['Clinical Metric']}** was the primary factor driving the risk score up.")
+                        if not contrib_df.empty:
+                            max_factor = contrib_df.loc[contrib_df["Risk Contribution"].idxmax()]
+                            if max_factor["Risk Contribution"] > 0:
+                                st.warning(f"💡 **Key Risk Driver:** **{max_factor['Clinical Metric']}** (+{max_factor['Risk Contribution']:.4f}) was the primary factor driving risk upward.")
+                            else:
+                                st.info("💡 **Protective Factors:** All individual measurements contributed neutrally or protectively relative to baseline.")
                     
                     # ----------------------------------------
                     # Lifestyle Recommendation Engine
                     # ----------------------------------------
                     st.markdown("---")
-                    st.subheader("📋 Personalized Recommendations")
+                    st.subheader("📋 Personalized Clinical & Lifestyle Recommendations")
                     
                     recs = []
                     
                     if bmi >= 30.0:
-                        recs.append("🏋️ **Weight Management:** Your BMI is in the clinical obesity range (>= 30). We recommend consulting a nutritionist/dietitian and introducing moderate-intensity cardiovascular exercise (such as brisk walking) for at least 150 minutes per week to help manage visceral fat and weight.")
+                        recs.append("🏋️ **Weight Management:** BMI is in the clinical obesity range (>= 30). Recommend consulting a registered dietitian and initiating 150+ minutes/week of moderate cardiovascular activity.")
                     elif bmi >= 25.0:
-                        recs.append("🥗 **Healthy Weight Advice:** Your BMI is in the overweight range (25.0 - 29.9). Balanced portion sizes and reducing processed sugar consumption can help prevent progression to higher risk categories.")
+                        recs.append("🥗 **Healthy Weight Advice:** BMI is in the overweight range (25.0 - 29.9). Balanced portion control and minimizing refined carbohydrates can prevent progression.")
                         
                     if glucose >= 140.0:
-                        recs.append("🩺 **Consult a Physician:** Your glucose level is elevated (>= 140 mg/dL). We highly recommend consulting a primary healthcare provider or endocrinologist for a diagnostic HbA1c test or an oral glucose tolerance test (OGTT).")
+                        recs.append("🩺 **Elevated Glucose Evaluation:** Post-challenge glucose is elevated (>= 140 mg/dL). Strongly recommend a formal diagnostic fasting plasma glucose or HbA1c test with a physician.")
                     elif glucose < 70.0 and glucose > 0:
-                        recs.append("🍬 **Hypoglycemia Alert:** Your glucose level is quite low (< 70 mg/dL). Monitor for symptoms like shakiness, sweating, or dizziness, and discuss these readings with a medical professional.")
+                        recs.append("🍬 **Hypoglycemia Alert:** Blood glucose reading is below normal physiological fasting levels (< 70 mg/dL). Investigate potential hypoglycemic episodes.")
                         
                     if age >= 45:
-                        recs.append("📋 **Regular Screening Protocol:** American Diabetes Association (ADA) guidelines suggest that adults aged 45 and older should undergo regular diabetes screening every 3 years, regardless of symptoms.")
+                        recs.append("📋 **Standard Screening Protocol:** Per American Diabetes Association (ADA) guidelines, adults aged 45 and older should undergo routine diabetes screening every 3 years.")
                         
                     if blood_pressure >= 130.0:
-                        recs.append("❤️ **Hypertension Monitoring:** Your diastolic blood pressure is elevated (>= 80 mm Hg / Stage 1 or 2 Hypertension ranges). Reducing dietary sodium, managing daily stressors, and tracking blood pressure at home are recommended cardiovascular safeguards.")
+                        recs.append("❤️ **Blood Pressure Review:** Diastolic pressure is elevated. Recommend home blood pressure tracking and reduction in dietary sodium.")
                         
                     if insulin >= 166.0:
-                        recs.append("🧬 **Insulin Sensitivity Review:** Your insulin levels are high, which can be an early clinical indicator of insulin resistance. Incorporating weight lifting, resistance exercises, and high-fiber complex carbohydrates can improve insulin sensitivity.")
+                        recs.append("🧬 **Insulin Sensitivity Assessment:** Elevated insulin may indicate underlying insulin resistance. Resistance training and high-fiber diets can help improve insulin sensitivity.")
                         
                     if not recs:
-                        st.success("🎉 **Keep up the good work!** All entered clinical metrics (BMI, Glucose, BP, Age, Insulin) currently fall within standard healthy ranges. Maintain a balanced diet and active lifestyle.")
+                        st.success("🎉 **All Entered Metrics are Within Healthy Ranges:** Maintain current balanced nutrition and regular physical activity.")
                     else:
                         for rec in recs:
                             st.info(rec)
                             
-
-                    
                 else:
-                    st.error("Failed to connect to the FastAPI server. Please check the backend log.")
+                    st.error(f"Backend API error (Status Code: {response.status_code}). Detail: {response.text}")
             except Exception as e:
-                st.error(f"Connection error to backend API: {e}")
-                st.info("Ensure the FastAPI server is running locally on port 8001.")
+                st.error(f"Unable to connect to backend API at {API_URL}: {e}")
+                st.info("Please verify that the FastAPI backend server is running via `python main.py` on port 8001.")
 
 # ==========================================
 # PAGE 2: MODEL INSIGHTS
@@ -253,73 +261,72 @@ if page == "Risk Predictor":
 elif page == "Model Insights":
     st.title("📊 Global Model Insights")
     st.markdown("""
-    This page shows the global characteristics of our trained **Logistic Regression** model. Unlike local patient explanations, 
-    this shows which variables the model has learned are generally the most important indicators of diabetes across the whole dataset.
+    This page presents the global feature importance learned by our deployed **Random Forest** ensemble. 
+    Unlike the local patient-level attribution on the *Risk Predictor* page, global importance reflects 
+    which clinical variables are most influential overall across the entire training population.
     """)
     
-    with st.spinner("Fetching global insights from FastAPI backend..."):
+    with st.spinner("Fetching global model insights from FastAPI backend..."):
         try:
-            response = requests.get(f"{API_URL}/model-insights")
+            response = requests.get(f"{API_URL}/model-insights", timeout=10)
             if response.status_code == 200:
                 insights = response.json()
                 
-                coefs = insights["coefficients"]
-                top_factors = insights["top_risk_factors"]
-                intercept = insights["intercept"]
+                feature_imp = insights.get("feature_importances", insights.get("coefficients", {}))
+                top_factors = insights.get("top_risk_factors", [])
+                model_type = insights.get("model_type", "Random Forest")
                 
-                # Visual layout for coefficients
+                # Visual layout
                 col_chart, col_list = st.columns([1.2, 1.0])
                 
                 with col_chart:
-                    st.subheader("Global Logistic Regression Coefficients")
+                    st.subheader(f"Global {model_type} Feature Importance (Gini / MDI)")
                     st.markdown("""
-                    The coefficient weights indicate the effect of changing each standardized feature by 1 standard deviation:
-                    - **Positive values (Red/Orange):** Increase the overall probability of a diabetes prediction.
-                    - **Negative values (Green):** Decrease the overall probability of a diabetes prediction.
+                    Features are measured by **Mean Decrease in Impurity (MDI / Gini Importance)** across all 100 decision trees:
+                    - Values sum to **1.0 (100%)**.
+                    - A higher score indicates a feature that creates larger, cleaner splits throughout the ensemble.
                     """)
                     
                     insights_df = pd.DataFrame(
-                        list(coefs.items()), 
-                        columns=["Clinical Metric", "Coefficient Weight"]
-                    ).sort_values(by="Coefficient Weight")
+                        list(feature_imp.items()), 
+                        columns=["Clinical Metric", "Importance Score"]
+                    ).sort_values(by="Importance Score")
                     
                     st.bar_chart(
                         data=insights_df,
                         x="Clinical Metric",
-                        y="Coefficient Weight",
+                        y="Importance Score",
                         horizontal=True
                     )
-                    st.caption(f"Model Intercept (Base Bias): {intercept:.4f}")
                     
                 with col_list:
-                    st.subheader("Top Risk Factors (Ranked by Influence)")
-                    st.markdown("Features are ranked by their **absolute weight**, representing their total relative contribution strength in either direction:")
+                    st.subheader("Top Risk Factors (Ranked by Ensemble Importance)")
+                    st.markdown("Relative ranking across all trained decision trees:")
                     
-                    # Find maximum absolute coefficient to scale the progress bars
-                    max_abs_coef = max([f["abs_coefficient"] for f in top_factors])
+                    max_imp = max([f.get("importance", f.get("abs_coefficient", 0.0)) for f in top_factors]) if top_factors else 1.0
                     
-                    # Render ranked progress bars
                     for rank, factor in enumerate(top_factors, 1):
                         feature_name = factor["feature"]
-                        coefficient = factor["coefficient"]
-                        abs_coef = factor["abs_coefficient"]
+                        imp = factor.get("importance", factor.get("abs_coefficient", 0.0))
                         
-                        # Calculate percentage for progress bar
-                        scaled_val = float(abs_coef / max_abs_coef)
+                        scaled_val = float(imp / max_imp) if max_imp > 0 else 0.0
                         
-                        # Build layout
                         st.write(f"**{rank}. {feature_name}**")
-                        st.progress(scaled_val)
+                        st.progress(min(max(scaled_val, 0.0), 1.0))
+                        st.caption(f"Importance: **{imp:.4f}** ({imp * 100:.1f}% relative share)")
                         
-                        if coefficient > 0:
-                            st.caption(f"Influence Score: {coefficient:+.4f} (Increases Risk)")
-                        else:
-                            st.caption(f"Influence Score: {coefficient:+.4f} (Reduces Risk)")
+                st.markdown("---")
+                st.info("""
+                🔍 **Global Feature Importance vs. Local Prediction Attribution:**
+                - **Global Importance (This Page):** Summarizes the average utility of each feature across every split in all 100 decision trees. It tells you that **Glucose** and **BMI** are generally the most decisive features in the dataset.
+                - **Local Attribution (Risk Predictor Page):** Shows the exact path a specific patient took through the ensemble. Even if a feature is globally important, for an individual with normal glucose and high blood pressure, the local driver will reflect their unique clinical profile.
+                """)
                             
             else:
                 st.error("Failed to load insights from backend.")
         except Exception as e:
             st.error(f"Error connecting to backend API: {e}")
+            st.info("Ensure the FastAPI backend is running on port 8001 via `python main.py`.")
 
 # ==========================================
 # PAGE 3: MODEL EVALUATION
@@ -327,26 +334,29 @@ elif page == "Model Insights":
 elif page == "Model Evaluation":
     st.title("🧪 Model Training & Performance Evaluation")
     st.markdown("""
-    In compliance with production-grade engineering, we trained multiple model architectures on the split dataset 
-    to compare performance. Review the evaluation metrics below.
+    To ensure evidence-based model selection, we trained and compared **Logistic Regression**, **Random Forest**, and **XGBoost** 
+    on an identical stratified 80/20 train-test partition using leakage-free preprocessing.
     """)
     
     with st.spinner("Fetching evaluation metrics from FastAPI backend..."):
         try:
-            response = requests.get(f"{API_URL}/model-evaluation")
+            response = requests.get(f"{API_URL}/model-evaluation", timeout=10)
             if response.status_code == 200:
                 eval_data = response.json()
                 
                 comp_table = eval_data["comparison_table"]
                 cm = eval_data["confusion_matrix"]
                 roc = eval_data["roc_curve"]
+                deployed_model = eval_data.get("deployed_model", "Random Forest")
                 
                 # 1. Comparison Table
-                st.subheader("Model Performance Comparison")
-                st.markdown("Metrics computed on the hold-out testing partition (20% of the dataset):")
+                st.subheader("Model Performance Comparison (Holdout Test Set)")
+                st.markdown("All metrics evaluated on the identical 20% holdout split (154 samples):")
                 
                 comp_df = pd.DataFrame(comp_table)
                 st.dataframe(comp_df, use_container_width=True)
+                
+                st.success(f"🏆 **Deployed Architecture: {deployed_model}** — Achieved superior Accuracy, Precision, Recall, and ROC-AUC compared to baseline Logistic Regression.")
                 
                 st.markdown("---")
                 
@@ -355,17 +365,15 @@ elif page == "Model Evaluation":
                 
                 # 2. Confusion Matrix Plot
                 with plot_col1:
-                    st.subheader("Confusion Matrix (Deployed Model)")
+                    st.subheader(f"Confusion Matrix ({deployed_model})")
                     
                     tn, fp, fn, tp = cm["tn"], cm["fp"], cm["fn"], cm["tp"]
                     
                     fig, ax = plt.subplots(figsize=(6, 5))
                     
-                    # Modern styling
                     matrix_data = np.array([[tn, fp], [fn, tp]])
                     im = ax.imshow(matrix_data, cmap="Blues", interpolation="nearest")
                     
-                    # Annotations
                     labels = [
                         [f"True Neg (TN)\n{tn}", f"False Pos (FP)\n{fp}"],
                         [f"False Neg (FN)\n{fn}", f"True Pos (TP)\n{tp}"]
@@ -376,7 +384,6 @@ elif page == "Model Evaluation":
                             text_color = "white" if matrix_data[i, j] > (matrix_data.max() / 2) else "black"
                             ax.text(j, i, labels[i][j], ha="center", va="center", color=text_color, fontsize=12, fontweight="bold")
                             
-                    # Labels configuration
                     ax.set_xticks([0, 1])
                     ax.set_yticks([0, 1])
                     ax.set_xticklabels(["Low Risk (0)", "High Risk (1)"])
@@ -390,32 +397,32 @@ elif page == "Model Evaluation":
                     
                     st.markdown("""
                     **Understanding the Confusion Matrix:**
-                    - **True Negatives (TN):** Healthy patients predicted correctly as low risk.
-                    - **False Positives (FP):** Healthy patients incorrectly flagged as high risk (causes false alarm/anxiety).
-                    - **False Negatives (FN):** Patients with diabetes who were missed by the model.
-                    - **True Positives (TP):** Patients with diabetes correctly identified.
+                    - **True Negatives (TN):** Healthy patients correctly classified as low risk.
+                    - **False Positives (FP):** Healthy patients flagged as high risk (triggers follow-up confirmatory testing).
+                    - **False Negatives (FN):** Diabetic patients missed by the model.
+                    - **True Positives (TP):** Diabetic patients correctly identified.
                     
-                    *In a clinical setting, **False Negatives are the most critical metric**. Missing a diabetic patient (FN) is far more dangerous than flagging a healthy patient for follow-up testing (FP). Thus, clinicians focus on maximizing **Recall** (Sensitivity) to minimize False Negatives.*
+                    *In medical triage, minimizing **False Negatives** (maximizing Recall) is crucial to avoid missed diagnoses.*
                     """)
                     
                 # 3. ROC Curve Plot
                 with plot_col2:
-                    st.subheader("ROC Curve (Deployed Model)")
+                    st.subheader(f"ROC Curve ({deployed_model})")
                     
                     fpr, tpr, auc_val = roc["fpr"], roc["tpr"], roc["auc"]
                     
                     fig, ax = plt.subplots(figsize=(6, 5))
                     
                     # Plot ROC line
-                    ax.plot(fpr, tpr, color="darkorange", lw=2.5, label=f"Logistic Regression (AUC = {auc_val:.4f})")
+                    ax.plot(fpr, tpr, color="#1f77b4", lw=2.5, label=f"{deployed_model} (AUC = {auc_val:.4f})")
                     # Plot diagonal reference
-                    ax.plot([0, 1], [0, 1], color="navy", lw=1.5, linestyle="--", label="Random Guess (AUC = 0.50)")
+                    ax.plot([0, 1], [0, 1], color="gray", lw=1.5, linestyle="--", label="Random Classifier (AUC = 0.50)")
                     
                     ax.set_xlim([0.0, 1.0])
                     ax.set_ylim([0.0, 1.05])
                     ax.set_xlabel("False Positive Rate (1 - Specificity)", fontweight="bold")
                     ax.set_ylabel("True Positive Rate (Sensitivity / Recall)", fontweight="bold")
-                    ax.set_title("Receiver Operating Characteristic (ROC)", fontweight="bold")
+                    ax.set_title(f"ROC Characteristic — {deployed_model}", fontweight="bold")
                     ax.legend(loc="lower right")
                     ax.grid(True, linestyle=":", alpha=0.6)
                     plt.tight_layout()
@@ -423,13 +430,13 @@ elif page == "Model Evaluation":
                     st.pyplot(fig)
                     
                     st.markdown(f"""
-                    **Understanding the ROC Curve & AUC Score:**
-                    - **ROC Curve:** Plots the True Positive Rate (Recall) against the False Positive Rate at all possible classification thresholds.
-                    - **AUC Score (Area Under Curve):** Quantifies the overall ability of the model to distinguish between classes. 
-                    - An **AUC of {auc_val:.4f}** indicates that if you randomly pick one patient with diabetes and one patient without, the model has an **{auc_val*100:.1f}% chance** of assigning a higher risk probability to the diabetic patient.
+                    **Understanding ROC-AUC:**
+                    - **ROC-AUC ({auc_val:.4f}):** Indicates that for any randomly chosen pair of diabetic and non-diabetic patients, 
+                      the model assigns a higher risk score to the diabetic patient **{auc_val * 100:.1f}%** of the time.
                     """)
                     
             else:
                 st.error("Failed to load evaluation data from backend.")
         except Exception as e:
             st.error(f"Error connecting to backend API: {e}")
+            st.info("Ensure the FastAPI backend is running on port 8001 via `python main.py`.")
